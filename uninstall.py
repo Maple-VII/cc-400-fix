@@ -149,7 +149,7 @@ def main():
     """主卸载流程"""
     print()
     print("=" * 50)
-    print("  Claude Auto Fix Hook - 卸载程序")
+    print("  cc-400-fix - 卸载程序")
     print("=" * 50)
     print()
 

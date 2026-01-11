@@ -224,7 +224,7 @@ def main():
     """主安装流程"""
     print()
     print("=" * 50)
-    print("  Claude Auto Fix Hook - 安装程序")
+    print("  cc-400-fix - 安装程序")
     print("=" * 50)
     print()
 

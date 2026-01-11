@@ -114,6 +114,10 @@ def remove_thinking_blocks(obj):
         if block_type == 'reasoning':
             return _REMOVED, 1
 
+        # 删除空 signature 的块
+        if obj.get('signature') == '':
+            return _REMOVED, 1
+
         # 删除缺少 signature 的 thinking 块
         if block_type and 'thinking' in str(block_type).lower():
             if 'signature' not in obj:
