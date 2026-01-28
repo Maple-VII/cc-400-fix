@@ -15,11 +15,24 @@ API Error 400: thinking.signature: Field required
 
 ## 解决方案
 
-本项目提供一个 Claude Code Hook，在每次发送消息前自动检测并修复问题：
+本项目提供一个 Claude Code Hook，自动检测渠道切换并修复问题：
 
-- **自动触发**：无需手动操作
+- **智能检测**：仅在渠道切换时触发清理
+- **自动阻止**：清理后阻止无效请求，提示重启
 - **零数据丢失**：只删除 thinking 块，保留所有对话内容
-- **全覆盖**：处理空 signature、无效 signature、reasoning 块
+- **全覆盖**：处理 thinking、redacted_thinking、reasoning 块
+
+## 工作流程
+
+```
+切换渠道 → 发送消息 → Hook 检测到切换
+    ↓
+清理会话文件中的 thinking 块
+    ↓
+阻止本次请求，提示重启
+    ↓
+重启 Claude Code → 正常使用
+```
 
 ## 安装
 
@@ -59,16 +72,27 @@ Hook 将在下次发送消息时自动生效。
 
 ## 卸载
 
-```bash
+### Windows
+
+双击运行 `uninstall.bat`，或：
+
+```cmd
 python uninstall.py
+```
+
+### macOS / Linux
+
+```bash
+python3 uninstall.py
 ```
 
 ## 工作原理
 
 1. Hook 注册到 Claude Code 的 `UserPromptSubmit` 事件
-2. 每次发送消息前，自动扫描会话文件
-3. 如检测到问题 thinking 块，自动删除
-4. 静默完成，用户无感知
+2. 每次发送消息前，检测当前渠道是否与上次不同
+3. 如检测到渠道切换，强制清理会话文件中的 thinking 块
+4. 清理后阻止请求（exit code 2），提示用户重启
+5. 重启后 Claude Code 加载干净的会话文件，正常使用
 
 ### 处理的块类型
 
@@ -89,6 +113,7 @@ cc-400-fix/
 ├── install.bat            # Windows 一键安装
 ├── install.sh             # Unix 一键安装
 ├── uninstall.py           # 卸载脚本
+├── uninstall.bat          # Windows 一键卸载
 ├── .gitignore             # Git 忽略规则
 ├── LICENSE                # MIT 许可证
 └── README.md              # 本文件
@@ -100,6 +125,7 @@ cc-400-fix/
 
 - Hook 脚本：`~/.claude/hooks/auto_fix_thinking.py`
 - 配置文件：`~/.claude/settings.json`
+- 渠道状态：`~/.claude/.last_channel`（自动生成）
 
 ## 手动配置
 
@@ -125,6 +151,20 @@ cc-400-fix/
 
 > Windows 使用 `python` 并转义路径：`python "C:\\Users\\用户名\\.claude\\hooks\\auto_fix_thinking.py"`
 
+## 调试模式
+
+如需查看 Hook 运行日志，在 `~/.claude/settings.json` 的 `env` 中添加：
+
+```json
+{
+  "env": {
+    "CLAUDE_HOOK_DEBUG": "1"
+  }
+}
+```
+
+日志文件位置：`~/.claude/auto_fix.log`
+
 ## 常见问题
 
 ### Q: 安装后没有效果？
@@ -136,6 +176,10 @@ cc-400-fix/
 ### Q: 会丢失对话内容吗？
 
 不会。只删除 thinking 块，所有用户消息和 AI 回复都会保留。
+
+### Q: 每次切换渠道都需要重启吗？
+
+是的。由于 Claude Code 在启动时加载会话到内存，Hook 清理文件后需要重启才能加载修复后的内容。但这只发生在渠道切换且有 thinking 块需要清理时。
 
 ### Q: 影响性能吗？
 

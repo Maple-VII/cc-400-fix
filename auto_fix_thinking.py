@@ -2,18 +2,7 @@
 """
 Claude Code Auto Fix Hook - 自动修复 thinking block 签名错误
 
-用于 UserPromptSubmit 事件，在发送消息前自动检测并修复问题。
-
-问题场景：
-- 不同 API 渠道之间切换
-- thinking block 签名失效
-
-处理的错误类型：
-- API Error 400: Invalid signature in thinking block
-- API Error 400: thinking.signature: Field required
-
-原理：
-删除所有 thinking/redacted_thinking/reasoning 块，保留其他对话内容。
+检测渠道切换，自动清理文件，阻止无效请求。
 """
 
 import json
@@ -28,16 +17,15 @@ from datetime import datetime
 # 常量
 # ============================================================
 
-# 用于标记需要删除的对象
 _REMOVED = object()
-
-# 日志文件（可选，设为 None 禁用）
-LOG_FILE = Path.home() / ".claude" / "auto_fix.log"
+CLAUDE_HOME = Path.home() / ".claude"
+LOG_FILE = CLAUDE_HOME / "auto_fix.log"
+CHANNEL_STATE_FILE = CLAUDE_HOME / ".last_channel"
+SETTINGS_FILE = CLAUDE_HOME / "settings.json"
 DEBUG = os.environ.get("CLAUDE_HOOK_DEBUG", "").lower() in ("1", "true", "yes")
 
 
 def log(message: str):
-    """写入调试日志（仅在 DEBUG 模式下）"""
     if not DEBUG:
         return
     try:
@@ -45,6 +33,54 @@ def log(message: str):
             f.write(f"{datetime.now().isoformat()} | {message}\n")
     except Exception:
         pass
+
+
+# ============================================================
+# 渠道检测
+# ============================================================
+
+def get_current_channel() -> str:
+    try:
+        if SETTINGS_FILE.exists():
+            with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f).get('env', {}).get('ANTHROPIC_BASE_URL', '')
+    except Exception:
+        pass
+    return ''
+
+
+def get_last_channel() -> str:
+    try:
+        if CHANNEL_STATE_FILE.exists():
+            return CHANNEL_STATE_FILE.read_text(encoding='utf-8').strip()
+    except Exception:
+        pass
+    return ''
+
+
+def save_channel(url: str):
+    try:
+        CHANNEL_STATE_FILE.write_text(url, encoding='utf-8')
+    except Exception:
+        pass
+
+
+def check_channel_switch() -> tuple:
+    """返回 (是否切换, 旧渠道, 新渠道)"""
+    current = get_current_channel()
+    last = get_last_channel()
+
+    if not current:
+        return False, '', ''
+
+    if not last:
+        save_channel(current)
+        return False, '', current
+
+    if current != last:
+        return True, last, current
+
+    return False, last, current
 
 # ============================================================
 # 核心逻辑
@@ -149,35 +185,41 @@ def remove_thinking_blocks(obj):
         return obj, 0
 
 
-def fix_session_file(filepath: Path) -> int:
+def fix_session_file(filepath: Path, force: bool = False) -> int:
     """
     修复会话文件
 
+    Args:
+        filepath: 会话文件路径
+        force: 是否强制清理（渠道切换时使用）
+
     返回: 删除的 thinking 块数量
     """
-    log(f"检查文件: {filepath}")
+    log(f"检查文件: {filepath}" + (" [强制模式]" if force else ""))
 
     if not filepath.exists():
         log(f"文件不存在: {filepath}")
         return 0
 
-    # 先快速扫描是否有问题
-    has_problem = False
-    try:
-        with open(filepath, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                    if has_problematic_thinking(data):
-                        has_problem = True
-                        break
-                except json.JSONDecodeError:
-                    continue
-    except Exception:
-        return 0
+    # 强制模式：直接清理，不做预扫描
+    # 普通模式：先快速扫描是否有问题
+    has_problem = force
+    if not force:
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                        if has_problematic_thinking(data):
+                            has_problem = True
+                            break
+                    except json.JSONDecodeError:
+                        continue
+        except Exception:
+            return 0
 
     # 无问题则跳过
     if not has_problem:
@@ -235,40 +277,51 @@ def fix_session_file(filepath: Path) -> int:
 
 
 def main():
-    """
-    Hook 入口点
-
-    从 stdin 读取 Claude 提供的 JSON 数据：
-    {
-        "session_id": "xxx",
-        "transcript_path": "/path/to/session.jsonl",
-        "prompt": "用户消息",
-        "cwd": "/project/path"
-    }
-    """
+    """Hook 入口点"""
     try:
-        # 设置 stdin 编码
         sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8')
-
-        # 读取 hook 输入
         input_data = json.load(sys.stdin)
         log(f"收到 Hook 输入: session_id={input_data.get('session_id', 'N/A')}")
 
-        # 获取会话文件路径
         transcript_path = input_data.get('transcript_path')
-
         if not transcript_path:
             log("无 transcript_path，跳过")
-            # 没有 transcript_path，静默退出
             sys.exit(0)
 
-        # 修复文件
         filepath = Path(transcript_path)
-        removed = fix_session_file(filepath)
-        log(f"处理完成，共删除 {removed} 个块")
+
+        # 检测渠道切换
+        switched, old_ch, new_ch = check_channel_switch()
+
+        if switched:
+            log(f"渠道切换: {old_ch} -> {new_ch}")
+            # 清理文件
+            removed = fix_session_file(filepath, force=True)
+            log(f"已清理 {removed} 个 thinking 块")
+
+            if removed > 0:
+                # 更新渠道记录
+                save_channel(new_ch)
+                # 阻止请求，通过 stderr 提示用户
+                msg = f"""
+╔══════════════════════════════════════════════════════════╗
+║  ⚡ Auto Fix - 渠道切换检测                              ║
+╠══════════════════════════════════════════════════════════╣
+║  已清理 {removed} 个 thinking 块，会话文件已修复。
+║  请重启 Claude Code 以加载修复后的会话。                 ║
+╚══════════════════════════════════════════════════════════╝
+"""
+                sys.stderr.buffer.write(msg.encode('utf-8'))
+                sys.exit(2)  # Exit code 2 = 阻止请求
+            else:
+                # 没有需要清理的，更新记录并继续
+                save_channel(new_ch)
+        else:
+            # 普通模式：检测并清理
+            removed = fix_session_file(filepath, force=False)
+            log(f"处理完成，共删除 {removed} 个块")
 
     except Exception as e:
-        # 任何错误都静默退出，不影响用户操作
         log(f"Hook 异常: {e}")
 
     sys.exit(0)
